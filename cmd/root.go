@@ -32,31 +32,40 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conns = append(conns, ws)
-	ws.SetCloseHandler(func(code int, text string) error {
-		index := 0
-		for i, c := range conns {
-			if c == ws {
-				index = i
-			}
-		}
-		conns = remove(conns, index)
-		fmt.Println(conns)
-		return nil
-	})
+	// ws.SetCloseHandler(func(code int, text string) error {
+	// 	index := 0
+	// 	for i, c := range conns {
+	// 		if c == ws {
+	// 			index = i
+	// 		}
+	// 	}
+	// 	conns = remove(conns, index)
+	// 	fmt.Println(conns)
+	// 	return nil
+	// })
 
 }
 
-func injectReloadScript(path string) {
+func injectReloadScript(path string) []byte {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}
-	_ := strings.Index(string(b), "</body>")
+	index := strings.Index(string(b), "</body>")
+	if index < 0 {
+		fmt.Println("cannot hot reload with no body")
+		return b
+	}
+	newString := string(b[:index]) + "<script>" + string(script) + "</script>" + string(b[index:])
+
+	return []byte(newString)
 }
 
 func remove[T any](s []T, i int) []T {
+
 	s[i] = s[len(s)-1]
 	return s[:len(s)-1]
+
 }
 
 var port int
@@ -67,7 +76,6 @@ var rootCmd = &cobra.Command{
 	Long:  "an http server with hot reloading",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		http.HandleFunc("/ws", serveWs)
 		path := ""
 		if len(args) > 0 {
 			path = args[0]
@@ -79,6 +87,37 @@ var rootCmd = &cobra.Command{
 			path = p
 		}
 
+		http.HandleFunc("/ws", serveWs)
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			p, _ := strings.CutPrefix(r.URL.String(), "/")
+			if filepath.IsLocal(p) {
+				// safe
+				if strings.HasSuffix(p, ".html") || strings.HasSuffix(p, ".htm") {
+					r.Header.Add("Content-Type", "text/html")
+					w.Write(injectReloadScript(p))
+				} else {
+					http.ServeFile(w, r, p)
+				}
+			}
+
+			if p == "" {
+				//look for root html
+				files, err := os.ReadDir(path)
+				if err != nil {
+					panic(err)
+				}
+				for _, f := range files {
+					if !f.IsDir() && (strings.HasSuffix(f.Name(), ".html") || strings.HasSuffix(f.Name(), ".htm")) {
+						fmt.Println(f.Name())
+						r.Header.Add("Content-Type", "text/html")
+						w.Write(injectReloadScript(filepath.Join(path, f.Name())))
+						break
+					}
+				}
+			}
+			fmt.Println(strings.CutPrefix(r.URL.String(), "/"))
+		})
+
 		// create watcher
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
@@ -89,7 +128,7 @@ var rootCmd = &cobra.Command{
 		// inject reload scripts into all html files
 		filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 			fmt.Println(p)
-			if strings.HasSuffix(p, "htm") || strings.HasSuffix(p, "html") {
+			if strings.HasSuffix(p, ".htm") || strings.HasSuffix(p, ".html") {
 				injectReloadScript(p)
 			}
 			if d.IsDir() {
@@ -121,10 +160,16 @@ var rootCmd = &cobra.Command{
 						err := i.WriteMessage(websocket.TextMessage, []byte("reload"))
 						if err != nil {
 							// presumably connection closed so remove from slice
-							conns = remove(conns, index)
+							fmt.Println("conns", len(conns))
+							if len(conns) == 1 && index == 0 {
+								conns = []*websocket.Conn{}
+							} else {
+								// something up with this ???????????
+								conns = remove(conns, index)
+							}
+							fmt.Println("conns", len(conns))
 
 						}
-						fmt.Println("conns", len(conns))
 					}
 				case err, ok := <-watcher.Errors:
 					if !ok {
@@ -136,8 +181,6 @@ var rootCmd = &cobra.Command{
 		}()
 
 		// Add a path.
-
-		http.Handle("/", http.StripPrefix("/", http.FileServer(http.Dir(path))))
 
 		go http.ListenAndServe(fmt.Sprintf(":%v", port), nil)
 		err = watcher.Add(path)
