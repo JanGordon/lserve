@@ -103,7 +103,7 @@ func cleanConns() {
 }
 
 func printReloadCount() {
-	if reloadCount > 1 {
+	if reloadCount > 2 {
 		fmt.Print("\033[1A\033[K")
 
 	}
