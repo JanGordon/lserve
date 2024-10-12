@@ -12,10 +12,15 @@ import (
 
 	_ "embed"
 
+	"github.com/fatih/color"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 )
+
+var warn = color.New(color.FgHiYellow)
+var e = color.New(color.BgHiRed)
+var success = color.New(color.FgGreen).Add(color.Underline)
 
 //go:embed js/reload.js
 var script []byte
@@ -27,10 +32,16 @@ var conns = []*websocket.Conn{}
 func serveWs(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade:", err)
+		e.Println("upgrade:", err)
 		return
 	}
+	reloadCount += 2
+	cleanConns()
+
 	conns = append(conns, ws)
+
+	printReloadCount()
+
 	// ws.SetCloseHandler(func(code int, text string) error {
 	// 	index := 0
 	// 	for i, c := range conns {
@@ -45,14 +56,22 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func injectReloadScript(path string) []byte {
-	b, err := os.ReadFile(path)
+func injectReloadScript(pat string) []byte {
+	b, err := os.ReadFile(pat)
 	if err != nil {
 		panic(err)
 	}
 	index := strings.Index(string(b), "</body>")
 	if index < 0 {
-		fmt.Println("cannot hot reload with no body")
+		relPath, err := filepath.Rel(path, pat)
+		if err != nil {
+			warn.Println(err)
+			warn.Printf("cannot hot reload with no body: %v \n", pat)
+
+		} else {
+			warn.Printf("cannot hot reload with no body: %v \n", relPath)
+
+		}
 		return b
 	}
 	newString := string(b[:index]) + "<script>" + string(script) + "</script>" + string(b[index:])
@@ -67,6 +86,33 @@ func remove[T any](s []T, i int) []T {
 
 }
 
+func cleanConns() {
+	toDelete := []*websocket.Conn{}
+	for index := 0; index < len(conns); index++ {
+		i := conns[index]
+		err := i.WriteMessage(websocket.TextMessage, []byte("ping"))
+		if err != nil {
+			// presumably connection closed so remove from slice
+			toDelete = append(toDelete, i)
+
+		}
+	}
+	for _, c := range toDelete {
+		conns = remove(conns, slices.Index(conns, c))
+	}
+}
+
+func printReloadCount() {
+	if reloadCount > 1 {
+		fmt.Print("\033[1A\033[K")
+
+	}
+	success.Printf("reloaded on %v clients (x%v)\n", len(conns), reloadCount/2)
+}
+
+var path = ""
+var reloadCount = 0 // divide by 2 becasue file modifies is called x2
+
 var port int
 
 var rootCmd = &cobra.Command{
@@ -75,7 +121,6 @@ var rootCmd = &cobra.Command{
 	Long:  "an http server with hot reloading",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		path := ""
 		if len(args) > 0 {
 			path = args[0]
 		} else {
@@ -107,14 +152,12 @@ var rootCmd = &cobra.Command{
 				}
 				for _, f := range files {
 					if !f.IsDir() && (strings.HasSuffix(f.Name(), ".html") || strings.HasSuffix(f.Name(), ".htm")) {
-						fmt.Println(f.Name())
 						r.Header.Add("Content-Type", "text/html")
 						w.Write(injectReloadScript(filepath.Join(path, f.Name())))
 						break
 					}
 				}
 			}
-			fmt.Println(strings.CutPrefix(r.URL.String(), "/"))
 		})
 
 		// create watcher
@@ -126,7 +169,6 @@ var rootCmd = &cobra.Command{
 
 		// inject reload scripts into all html files
 		filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
-			fmt.Println(p)
 			if strings.HasSuffix(p, ".htm") || strings.HasSuffix(p, ".html") {
 				injectReloadScript(p)
 			}
@@ -153,26 +195,22 @@ var rootCmd = &cobra.Command{
 							injectReloadScript(event.Name)
 						}
 					}
-					log.Println("modified file:", event.Op)
 					// error may occur if
 					toDelete := []*websocket.Conn{}
 					for index := 0; index < len(conns); index++ {
 						i := conns[index]
-						fmt.Println("Change!!")
 						err := i.WriteMessage(websocket.TextMessage, []byte("reload"))
 						if err != nil {
 							// presumably connection closed so remove from slice
-							fmt.Println("conns", len(conns))
 							toDelete = append(toDelete, i)
-							fmt.Println("conns", len(conns))
 
 						}
 					}
-					fmt.Println("conns", len(conns))
 					for _, c := range toDelete {
 						conns = remove(conns, slices.Index(conns, c))
 					}
-					fmt.Println("conns", len(conns))
+					// reloadCount++
+					printReloadCount()
 				case err, ok := <-watcher.Errors:
 					if !ok {
 						return
@@ -184,10 +222,18 @@ var rootCmd = &cobra.Command{
 
 		// Add a path.
 
-		go http.ListenAndServe(fmt.Sprintf(":%v", port), nil)
+		go func() {
+			err := http.ListenAndServe(fmt.Sprintf(":%v", port), nil)
+			if err != nil {
+				log.Fatal("server failed to start: ", err)
+			}
+		}()
+		fmt.Print("server started on ")
+		success.Printf("http://127.0.0.1:%v", port)
+		fmt.Println()
 		err = watcher.Add(path)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal("failed to add file watcher path: ", err)
 		}
 
 		// Block main goroutine forever.

@@ -5,6 +5,11 @@ ws.addEventListener("open", (e)=>{
 })
 
 ws.addEventListener("message", (e)=>{
-    console.log("recieved command to reload")
-    location.reload()
+    if (e.data == "reload") {
+        console.log("recieved command to reload")
+        location.reload()
+    } else if (e.data == "ping") {
+        ws.send("pong")
+    }
+   
 })
