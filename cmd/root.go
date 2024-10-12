@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	_ "embed"
@@ -18,8 +19,6 @@ import (
 
 //go:embed js/reload.js
 var script []byte
-
-var change = make(chan string)
 
 var upgrader = websocket.Upgrader{}
 
@@ -155,22 +154,25 @@ var rootCmd = &cobra.Command{
 						}
 					}
 					log.Println("modified file:", event.Op)
-					for index, i := range conns {
+					// error may occur if
+					toDelete := []*websocket.Conn{}
+					for index := 0; index < len(conns); index++ {
+						i := conns[index]
 						fmt.Println("Change!!")
 						err := i.WriteMessage(websocket.TextMessage, []byte("reload"))
 						if err != nil {
 							// presumably connection closed so remove from slice
 							fmt.Println("conns", len(conns))
-							if len(conns) == 1 && index == 0 {
-								conns = []*websocket.Conn{}
-							} else {
-								// something up with this ???????????
-								conns = remove(conns, index)
-							}
+							toDelete = append(toDelete, i)
 							fmt.Println("conns", len(conns))
 
 						}
 					}
+					fmt.Println("conns", len(conns))
+					for _, c := range toDelete {
+						conns = remove(conns, slices.Index(conns, c))
+					}
+					fmt.Println("conns", len(conns))
 				case err, ok := <-watcher.Errors:
 					if !ok {
 						return
